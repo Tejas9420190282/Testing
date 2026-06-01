@@ -355,16 +355,33 @@ export const detectMultiIpAbuse = async () => {
           },
         },
       },
+      {
+        $lookup: {
+          from: "users",
+          localField: "_id",
+          foreignField: "_id",
+          as: "user",
+        },
+      },
+      {
+        $unwind: "$user",
+      },
     ]);
 
     for (const item of suspiciousUsers) {
-      const user = await User.findById(item._id);
+      /* const user = await User.findById(item._id);
+
+      if (!user) continue;
+
+      const countries = item.countries; */
+
+      const user = item.user;
 
       if (!user) continue;
 
       const countries = item.countries;
 
-      user.riskLevel = "HIGH";
+      /* user.riskLevel = "HIGH";
       user.lastRiskDetectedAt = new Date();
 
       if (!user.riskFlags.includes("MULTI_IP_ABUSE")) {
@@ -374,7 +391,25 @@ export const detectMultiIpAbuse = async () => {
 
       if (user.isModified()) {
         await user.save();
+      } */
+
+      const updateData = {
+        riskLevel: "HIGH",
+        lastRiskDetectedAt: new Date(),
+      };
+
+      if (!user.riskFlags?.includes("MULTI_IP_ABUSE")) {
+        updateData.riskFlags = [...(user.riskFlags || []), "MULTI_IP_ABUSE"];
+
+        updateData.riskScore = (user.riskScore || 0) + 50;
       }
+
+      await User.updateOne(
+        { _id: user._id },
+        {
+          $set: updateData,
+        },
+      );
 
       const riskAlert = await createRiskAlert({
         userId: user._id,

@@ -35,13 +35,12 @@ const startRiskAlertCron = () => {
         console.log("⏰ Risk Cron Triggered");
         console.log("Running Risk Detection...");
 
-        await detectRoiSpike();
-
-        await detectMultiIpAbuse();
-
-        await detectWithdrawalAbuse();
-
-        await detectArbitragePattern();
+        await Promise.allSettled([
+          detectRoiSpike(),
+          detectMultiIpAbuse(),
+          detectWithdrawalAbuse(),
+          detectArbitragePattern(),
+        ]);
       } catch (error) {
         console.log("RiskAlertCron Error:", error.message);
       } finally {
