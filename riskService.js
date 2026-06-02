@@ -39,11 +39,36 @@ export const detectRoiSpike = async () => {
           },
         },
       },
-      {
+      /* {
         $lookup: {
           from: "users",
           localField: "userId",
           foreignField: "_id",
+          as: "user",
+        },
+      }, */
+      {
+        $lookup: {
+          from: "users",
+          let: { userId: "$userId" },
+          pipeline: [
+            {
+              $match: {
+                $expr: {
+                  $eq: ["$_id", "$$userId"],
+                },
+              },
+            },
+            {
+              $project: {
+                email: 1,
+                uniqueUserId: 1,
+                walletBalance: 1,
+                riskFlags: 1,
+                riskScore: 1,
+              },
+            },
+          ],
           as: "user",
         },
       },
@@ -54,6 +79,24 @@ export const detectRoiSpike = async () => {
 
     console.log("Trades Length:", trades.length);
     console.log("Trades:", trades);
+
+    const userIds = [
+      ...new Set(
+        trades.map((trade) => trade.user?._id?.toString()).filter(Boolean),
+      ),
+    ];
+
+    const existingAudits = await AuditLog.find({
+      userId: { $in: userIds },
+      action: "ROI_SPIKE_DETECTED",
+      createdAt: {
+        $gte: oneHourAgo,
+      },
+    }).select("userId");
+
+    const auditUserSet = new Set(
+      existingAudits.map((audit) => audit.userId.toString()),
+    );
 
     for (const trade of trades) {
       /* 
@@ -93,7 +136,7 @@ export const detectRoiSpike = async () => {
         }
  */
 
-        const currentUser = await User.findById(user._id).select(
+        /*         const currentUser = await User.findById(user._id).select(
           "riskFlags riskScore",
         );
 
@@ -106,6 +149,17 @@ export const detectRoiSpike = async () => {
           updateData.riskFlags = [...currentUser.riskFlags, "ROI_SPIKE"];
 
           updateData.riskScore = currentUser.riskScore + 100;
+        }
+ */
+        const updateData = {
+          riskLevel: "CRITICAL",
+          lastRiskDetectedAt: new Date(),
+        };
+
+        if (!user.riskFlags?.includes("ROI_SPIKE")) {
+          updateData.riskFlags = [...(user.riskFlags || []), "ROI_SPIKE"];
+
+          updateData.riskScore = (user.riskScore || 0) + 100;
         }
 
         await User.updateOne(
@@ -158,18 +212,7 @@ export const detectRoiSpike = async () => {
           }
         }
 
-        // Audit log
-        const existingAudit = await AuditLog.findOne({
-          userId: user._id,
-
-          action: "ROI_SPIKE_DETECTED",
-
-          createdAt: {
-            $gte: oneHourAgo,
-          },
-        });
-
-        if (!existingAudit) {
+        if (!auditUserSet.has(user._id.toString())) {
           await AuditLog.create({
             userId: user._id,
 
@@ -188,6 +231,8 @@ export const detectRoiSpike = async () => {
               pnl: trade.realizedPnl,
             },
           });
+
+          auditUserSet.add(user._id.toString());
         }
       }
     }
@@ -368,6 +413,22 @@ export const detectMultiIpAbuse = async () => {
       },
     ]);
 
+    const userIds = suspiciousUsers
+      .map((item) => item.user?._id)
+      .filter(Boolean);
+
+    const existingAudits = await AuditLog.find({
+      userId: { $in: userIds },
+      action: "MULTI_IP_ABUSE",
+      createdAt: {
+        $gte: oneDayAgo,
+      },
+    }).select("userId");
+
+    const auditUserSet = new Set(
+      existingAudits.map((audit) => audit.userId.toString()),
+    );
+
     for (const item of suspiciousUsers) {
       /* const user = await User.findById(item._id);
 
@@ -452,7 +513,7 @@ export const detectMultiIpAbuse = async () => {
           console.log("Risk Alert Email Error:", error.message);
         }
       }
-
+      /* 
       const existingAudit = await AuditLog.findOne({
         userId: user._id,
         action: "MULTI_IP_ABUSE",
@@ -479,6 +540,28 @@ export const detectMultiIpAbuse = async () => {
             countries,
           },
         });
+      } */
+
+      if (!auditUserSet.has(user._id.toString())) {
+        await AuditLog.create({
+          userId: user._id,
+
+          action: "MULTI_IP_ABUSE",
+
+          module: "RISK_ENGINE",
+
+          severity: "WARNING",
+
+          targetType: "LoginHistory",
+
+          targetId: item.loginId,
+
+          details: {
+            countries,
+          },
+        });
+
+        auditUserSet.add(user._id.toString());
       }
     }
   } catch (error) {
@@ -606,7 +689,7 @@ export const detectWithdrawalAbuse = async () => {
   try {
     const oneHourAgo = new Date(Date.now() - 60 * 60 * 1000);
 
-    const suspiciousUsers = await Transaction.aggregate([
+    /* const suspiciousUsers = await Transaction.aggregate([
       {
         $match: {
           type: "Withdrawal",
@@ -632,13 +715,89 @@ export const detectWithdrawalAbuse = async () => {
         },
       },
     ]);
+ */
+
+    const suspiciousUsers = await Transaction.aggregate([
+      {
+        $match: {
+          type: "Withdrawal",
+          status: "Rejected",
+          createdAt: {
+            $gte: oneHourAgo,
+          },
+        },
+      },
+      {
+        $group: {
+          _id: "$userId",
+          failedAttempts: {
+            $sum: 1,
+          },
+        },
+      },
+      {
+        $match: {
+          failedAttempts: {
+            $gte: 3,
+          },
+        },
+      },
+      {
+        $lookup: {
+          from: "users",
+          let: { userId: "$_id" },
+          pipeline: [
+            {
+              $match: {
+                $expr: {
+                  $eq: ["$_id", "$$userId"],
+                },
+              },
+            },
+            {
+              $project: {
+                email: 1,
+                uniqueUserId: 1,
+                withdrawalFrozen: 1,
+                riskFlags: 1,
+                riskScore: 1,
+              },
+            },
+          ],
+          as: "user",
+        },
+      },
+      {
+        $unwind: "$user",
+      },
+    ]);
+
+    const userIds = suspiciousUsers
+      .map((item) => item.user?._id)
+      .filter(Boolean);
+
+    const existingAudits = await AuditLog.find({
+      userId: { $in: userIds },
+      action: "WITHDRAWAL_FROZEN",
+      createdAt: {
+        $gte: oneHourAgo,
+      },
+    }).select("userId");
+
+    const auditUserSet = new Set(
+      existingAudits.map((audit) => audit.userId.toString()),
+    );
 
     for (const item of suspiciousUsers) {
-      const user = await User.findById(item._id);
+      /* const user = await User.findById(item._id);
+
+      if (!user) continue;
+ */
+      const user = item.user;
 
       if (!user) continue;
 
-      if (!user.withdrawalFrozen) {
+      /* if (!user.withdrawalFrozen) {
         user.withdrawalFrozen = true;
 
         user.riskLevel = "HIGH";
@@ -653,7 +812,26 @@ export const detectWithdrawalAbuse = async () => {
         if (user.isModified()) {
           await user.save();
         }
+      } */
+
+      const updateData = {
+        withdrawalFrozen: true,
+        riskLevel: "HIGH",
+        lastRiskDetectedAt: new Date(),
+      };
+
+      if (!user.riskFlags?.includes("WITHDRAWAL_ABUSE")) {
+        updateData.riskFlags = [...(user.riskFlags || []), "WITHDRAWAL_ABUSE"];
+
+        updateData.riskScore = (user.riskScore || 0) + 50;
       }
+
+      await User.updateOne(
+        { _id: user._id },
+        {
+          $set: updateData,
+        },
+      );
 
       const riskAlert = await createRiskAlert({
         userId: user._id,
@@ -678,8 +856,10 @@ export const detectWithdrawalAbuse = async () => {
               ["User Email", user.email],
               ["User ID", user.uniqueUserId],
               ["Failed Attempts", item.failedAttempts],
-              ["Withdrawal Frozen", user.withdrawalFrozen],
-              ["Risk Level", user.riskLevel],
+              /* ["Withdrawal Frozen", user.withdrawalFrozen],
+              ["Risk Level", user.riskLevel], */
+              ["Withdrawal Frozen", true],
+              ["Risk Level", "HIGH"],
             ],
 
             metadata: {
@@ -692,7 +872,7 @@ export const detectWithdrawalAbuse = async () => {
         }
       }
 
-      const existingAudit = await AuditLog.findOne({
+      /* const existingAudit = await AuditLog.findOne({
         userId: user._id,
         action: "WITHDRAWAL_FROZEN",
         createdAt: {
@@ -718,6 +898,28 @@ export const detectWithdrawalAbuse = async () => {
             failedAttempts: item.failedAttempts,
           },
         });
+      } */
+
+      if (!auditUserSet.has(user._id.toString())) {
+        await AuditLog.create({
+          userId: user._id,
+
+          action: "WITHDRAWAL_FROZEN",
+
+          module: "RISK_ENGINE",
+
+          severity: "CRITICAL",
+
+          targetType: "User",
+
+          targetId: user._id,
+
+          details: {
+            failedAttempts: item.failedAttempts,
+          },
+        });
+
+        auditUserSet.add(user._id.toString());
       }
     }
   } catch (error) {
@@ -750,11 +952,35 @@ export const detectArbitragePattern = async () => {
           },
         },
       },
-      {
+      /* {
         $lookup: {
           from: "users",
           localField: "userId",
           foreignField: "_id",
+          as: "user",
+        },
+      }, */
+      {
+        $lookup: {
+          from: "users",
+          let: { userId: "$userId" },
+          pipeline: [
+            {
+              $match: {
+                $expr: {
+                  $eq: ["$_id", "$$userId"],
+                },
+              },
+            },
+            {
+              $project: {
+                email: 1,
+                uniqueUserId: 1,
+                riskFlags: 1,
+                riskScore: 1,
+              },
+            },
+          ],
           as: "user",
         },
       },
@@ -762,6 +988,24 @@ export const detectArbitragePattern = async () => {
         $unwind: "$user",
       },
     ]);
+
+    const userIds = [
+      ...new Set(
+        trades.map((trade) => trade.user?._id?.toString()).filter(Boolean),
+      ),
+    ];
+
+    const existingAudits = await AuditLog.find({
+      userId: { $in: userIds },
+      action: "ARBITRAGE_PATTERN_DETECTED",
+      createdAt: {
+        $gte: oneHourAgo,
+      },
+    }).select("userId");
+
+    const auditUserSet = new Set(
+      existingAudits.map((audit) => audit.userId.toString()),
+    );
 
     for (const trade of trades) {
       if (!trade.closedAt || !trade.openedAt) continue;
@@ -791,7 +1035,7 @@ export const detectArbitragePattern = async () => {
           await user.save();
         }
  */
-        const currentUser = await User.findById(user._id).select(
+        /* const currentUser = await User.findById(user._id).select(
           "riskFlags riskScore",
         );
 
@@ -807,6 +1051,20 @@ export const detectArbitragePattern = async () => {
           ];
 
           updateData.riskScore = currentUser.riskScore + 40;
+        } */
+
+        const updateData = {
+          riskLevel: "HIGH",
+          lastRiskDetectedAt: new Date(),
+        };
+
+        if (!user.riskFlags?.includes("ARBITRAGE_PATTERN")) {
+          updateData.riskFlags = [
+            ...(user.riskFlags || []),
+            "ARBITRAGE_PATTERN",
+          ];
+
+          updateData.riskScore = (user.riskScore || 0) + 40;
         }
 
         await User.updateOne(
@@ -843,7 +1101,7 @@ export const detectArbitragePattern = async () => {
                 ["Trade Symbol", trade.symbol],
                 ["Duration", `${duration} ms`],
                 ["Trade ID", trade._id],
-                ["Risk Level", user.riskLevel],
+                ["Risk Level", "HIGH" /* user.riskLevel */],
               ],
 
               metadata: {
@@ -857,7 +1115,7 @@ export const detectArbitragePattern = async () => {
           }
         }
 
-        const existingAudit = await AuditLog.findOne({
+        /* const existingAudit = await AuditLog.findOne({
           userId: user._id,
           action: "ARBITRAGE_PATTERN_DETECTED",
           createdAt: {
@@ -884,6 +1142,29 @@ export const detectArbitragePattern = async () => {
               symbol: trade.symbol,
             },
           });
+        } */
+
+        if (!auditUserSet.has(user._id.toString())) {
+          await AuditLog.create({
+            userId: user._id,
+
+            action: "ARBITRAGE_PATTERN_DETECTED",
+
+            module: "RISK_ENGINE",
+
+            severity: "WARNING",
+
+            targetType: "Trade",
+
+            targetId: trade._id,
+
+            details: {
+              duration,
+              symbol: trade.symbol,
+            },
+          });
+
+          auditUserSet.add(user._id.toString());
         }
       }
     }
