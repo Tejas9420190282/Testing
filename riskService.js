@@ -18,15 +18,7 @@ export const detectRoiSpike = async () => {
     const oneHourAgo = new Date(Date.now() - 60 * 60 * 1000);
 
     console.log("One Hour Ago:", oneHourAgo);
-    /* 
-    const trades = await Trade.find({
-      status: "CLOSED",
-      closedAt: {
-        $gte: oneHourAgo,
-      },
-      realizedPnl: { $gt: 0 },
-    });
- */
+    
     const trades = await Trade.aggregate([
       {
         $match: {
@@ -39,14 +31,7 @@ export const detectRoiSpike = async () => {
           },
         },
       },
-      /* {
-        $lookup: {
-          from: "users",
-          localField: "userId",
-          foreignField: "_id",
-          as: "user",
-        },
-      }, */
+      
       {
         $lookup: {
           from: "users",
@@ -98,12 +83,10 @@ export const detectRoiSpike = async () => {
       existingAudits.map((audit) => audit.userId.toString()),
     );
 
-    for (const trade of trades) {
-      /* 
-        const user = await User.findById(trade.userId);
+    const userBulkUpdates = new Map();
 
-      if (!user) continue;
- */
+    for (const trade of trades) {
+      
       const user = trade.user;
 
       if (!user) continue;
@@ -119,38 +102,7 @@ export const detectRoiSpike = async () => {
       console.log("ROI > 500 ?", roi > 500);
 
       if (roi > 500) {
-        /* 
-        // Update user risk
-        user.riskLevel = "CRITICAL";
-
-        user.lastRiskDetectedAt = new Date();
-
-        if (!user.riskFlags.includes("ROI_SPIKE")) {
-          user.riskFlags.push("ROI_SPIKE");
-
-          user.riskScore += 100;
-        }
-
-        if (user.isModified()) {
-          await user.save();
-        }
- */
-
-        /*         const currentUser = await User.findById(user._id).select(
-          "riskFlags riskScore",
-        );
-
-        const updateData = {
-          riskLevel: "CRITICAL",
-          lastRiskDetectedAt: new Date(),
-        };
-
-        if (!currentUser.riskFlags.includes("ROI_SPIKE")) {
-          updateData.riskFlags = [...currentUser.riskFlags, "ROI_SPIKE"];
-
-          updateData.riskScore = currentUser.riskScore + 100;
-        }
- */
+       
         const updateData = {
           riskLevel: "CRITICAL",
           lastRiskDetectedAt: new Date(),
@@ -162,12 +114,16 @@ export const detectRoiSpike = async () => {
           updateData.riskScore = (user.riskScore || 0) + 100;
         }
 
-        await User.updateOne(
-          { _id: user._id },
-          {
-            $set: updateData,
+        userBulkUpdates.set(user._id.toString(), {
+          updateOne: {
+            filter: {
+              _id: user._id,
+            },
+            update: {
+              $set: updateData,
+            },
           },
-        );
+        });
 
         // Create alert
         const riskAlert = await createRiskAlert({
@@ -236,6 +192,12 @@ export const detectRoiSpike = async () => {
         }
       }
     }
+
+    if (userBulkUpdates.size > 0) {
+      await User.bulkWrite([...userBulkUpdates.values()]);
+
+      console.log(`✅ Bulk updated ${userBulkUpdates.size} users`);
+    }
   } catch (error) {
     console.log("detectRoiSpike Error:", error.message);
   }
@@ -244,122 +206,7 @@ export const detectRoiSpike = async () => {
 // ======================================
 // MULTI IP ABUSE
 // ======================================
-/* 
-export const detectMultiIpAbuse = async () => {
-  try {
-    const oneDayAgo = new Date(Date.now() - 24 * 60 * 60 * 1000);
 
-    const users = await User.find();
-
-    for (const user of users) {
-      const logs = await LoginHistory.find({
-        userId: user._id,
-        createdAt: {
-          $gte: oneDayAgo,
-        },
-      });
-
-      const countries = [
-        ...new Set(logs.map((log) => log.country).filter(Boolean)),
-      ];
-
-      console.log("User:", user.email);
-      console.log("Countries:", countries);
-      console.log("Countries Length:", countries.length);
-
-      if (countries.length >= 5) {
-        user.riskLevel = "HIGH";
-
-        user.lastRiskDetectedAt = new Date();
-
-        if (!user.riskFlags.includes("MULTI_IP_ABUSE")) {
-          user.riskFlags.push("MULTI_IP_ABUSE");
-
-          user.riskScore += 50;
-        }
-
-        if (user.isModified()) {
-          await user.save();
-        }
-
-        const riskAlert = await createRiskAlert({
-          userId: user._id,
-          type: "MULTI_IP_ABUSE",
-          severity: "HIGH",
-          message: "Multiple countries detected",
-          metadata: {
-            countries,
-          },
-        });
-
-        if (riskAlert.isNew) {
-          try {
-               console.log("🚨 Sending Multi-IP Alert Email...");
-
-            await emailService.sendAdminNotificationEmail({
-              subject: "🚨 Multi-IP Abuse Detected",
-
-              heading: "Multiple Country Login Detected",
-
-              message:
-                "A user logged in from multiple countries within 24 hours.",
-
-              rows: [
-                ["User Email", user.email],
-                ["User ID", user.uniqueUserId],
-                ["Countries", countries.join(", ")],
-                ["Country Count", countries.length],
-                ["Risk Level", user.riskLevel],
-              ],
-
-              metadata: {
-                type: "MULTI_IP_ABUSE",
-                userId: user._id,
-              },
-            });
-
-            console.log("✅ Multi-IP Alert Email Sent");
-          } catch (error) {
-            console.log("Risk Alert Email Error:", error.message);
-          }
-        }
-
-        const existingAudit = await AuditLog.findOne({
-          userId: user._id,
-
-          action: "MULTI_IP_ABUSE",
-
-          createdAt: {
-            $gte: oneDayAgo,
-          },
-        });
-
-        if (!existingAudit) {
-          await AuditLog.create({
-            userId: user._id,
-
-            action: "MULTI_IP_ABUSE",
-
-            module: "RISK_ENGINE",
-
-            severity: "WARNING",
-
-            targetType: "LoginHistory",
-
-            targetId: logs[0]?._id,
-
-            details: {
-              countries,
-            },
-          });
-        }
-      }
-    }
-  } catch (error) {
-    console.log("detectMultiIpAbuse Error:", error.message);
-  }
-};
- */
 export const detectMultiIpAbuse = async () => {
   try {
     const oneDayAgo = new Date(Date.now() - 24 * 60 * 60 * 1000);
@@ -429,30 +276,15 @@ export const detectMultiIpAbuse = async () => {
       existingAudits.map((audit) => audit.userId.toString()),
     );
 
+    const userBulkUpdates = new Map();
+
     for (const item of suspiciousUsers) {
-      /* const user = await User.findById(item._id);
-
-      if (!user) continue;
-
-      const countries = item.countries; */
 
       const user = item.user;
 
       if (!user) continue;
 
       const countries = item.countries;
-
-      /* user.riskLevel = "HIGH";
-      user.lastRiskDetectedAt = new Date();
-
-      if (!user.riskFlags.includes("MULTI_IP_ABUSE")) {
-        user.riskFlags.push("MULTI_IP_ABUSE");
-        user.riskScore += 50;
-      }
-
-      if (user.isModified()) {
-        await user.save();
-      } */
 
       const updateData = {
         riskLevel: "HIGH",
@@ -465,12 +297,16 @@ export const detectMultiIpAbuse = async () => {
         updateData.riskScore = (user.riskScore || 0) + 50;
       }
 
-      await User.updateOne(
-        { _id: user._id },
-        {
-          $set: updateData,
+      userBulkUpdates.set(user._id.toString(), {
+        updateOne: {
+          filter: {
+            _id: user._id,
+          },
+          update: {
+            $set: updateData,
+          },
         },
-      );
+      });
 
       const riskAlert = await createRiskAlert({
         userId: user._id,
@@ -513,34 +349,7 @@ export const detectMultiIpAbuse = async () => {
           console.log("Risk Alert Email Error:", error.message);
         }
       }
-      /* 
-      const existingAudit = await AuditLog.findOne({
-        userId: user._id,
-        action: "MULTI_IP_ABUSE",
-        createdAt: {
-          $gte: oneDayAgo,
-        },
-      });
-
-      if (!existingAudit) {
-        await AuditLog.create({
-          userId: user._id,
-
-          action: "MULTI_IP_ABUSE",
-
-          module: "RISK_ENGINE",
-
-          severity: "WARNING",
-
-          targetType: "LoginHistory",
-
-          targetId: item.loginId,
-
-          details: {
-            countries,
-          },
-        });
-      } */
+      
 
       if (!auditUserSet.has(user._id.toString())) {
         await AuditLog.create({
@@ -564,6 +373,12 @@ export const detectMultiIpAbuse = async () => {
         auditUserSet.add(user._id.toString());
       }
     }
+
+    if (userBulkUpdates.size > 0) {
+      await User.bulkWrite([...userBulkUpdates.values()]);
+
+      console.log(`✅ Multi-IP bulk updated ${userBulkUpdates.size} users`);
+    }
   } catch (error) {
     console.log("detectMultiIpAbuse Error:", error.message);
   }
@@ -572,150 +387,10 @@ export const detectMultiIpAbuse = async () => {
 // ======================================
 // WITHDRAWAL ABUSE
 // ======================================
-/* 
+
 export const detectWithdrawalAbuse = async () => {
   try {
     const oneHourAgo = new Date(Date.now() - 60 * 60 * 1000);
-
-    const users = await User.find();
-
-    for (const user of users) {
-      const failedWithdrawals = await Transaction.find({
-        userId: user._id,
-
-        type: "Withdrawal",
-
-        status: "Rejected",
-
-        createdAt: {
-          $gte: oneHourAgo,
-        },
-      });
-
-      if (failedWithdrawals.length >= 3) {
-        // Prevent repeated freeze
-        if (!user.withdrawalFrozen) {
-          user.withdrawalFrozen = true;
-
-          user.riskLevel = "HIGH";
-
-          user.lastRiskDetectedAt = new Date();
-
-          if (!user.riskFlags.includes("WITHDRAWAL_ABUSE")) {
-            user.riskFlags.push("WITHDRAWAL_ABUSE");
-
-            user.riskScore += 50;
-          }
-
-          if (user.isModified()) {
-            await user.save();
-          }
-        }
-
-        const riskAlert = await createRiskAlert({
-          userId: user._id,
-          type: "WITHDRAWAL_ABUSE",
-          severity: "HIGH",
-          message: "Multiple failed withdrawals detected",
-          metadata: {
-            failedAttempts: failedWithdrawals.length,
-          },
-        });
-
-        if (riskAlert.isNew) {
-          try {
-            await emailService.sendAdminNotificationEmail({
-              subject: "🚨 Withdrawal Abuse Detected",
-
-              heading: "Withdrawal Abuse Alert",
-
-              message: "Multiple failed withdrawal attempts detected.",
-
-              rows: [
-                ["User Email", user.email],
-                ["User ID", user.uniqueUserId],
-                ["Failed Attempts", failedWithdrawals.length],
-                ["Withdrawal Frozen", user.withdrawalFrozen],
-                ["Risk Level", user.riskLevel],
-              ],
-
-              metadata: {
-                type: "WITHDRAWAL_ABUSE",
-                userId: user._id,
-              },
-            });
-          } catch (error) {
-            console.log("Risk Alert Email Error:", error.message);
-          }
-        }
-
-        const existingAudit = await AuditLog.findOne({
-          userId: user._id,
-
-          action: "WITHDRAWAL_FROZEN",
-
-          createdAt: {
-            $gte: oneHourAgo,
-          },
-        });
-
-        if (!existingAudit) {
-          await AuditLog.create({
-            userId: user._id,
-
-            action: "WITHDRAWAL_FROZEN",
-
-            module: "RISK_ENGINE",
-
-            severity: "CRITICAL",
-
-            targetType: "User",
-
-            targetId: user._id,
-
-            details: {
-              failedAttempts: failedWithdrawals.length,
-            },
-          });
-        }
-      }
-    }
-  } catch (error) {
-    console.log("detectWithdrawalAbuse Error:", error.message);
-  }
-};
- */
-export const detectWithdrawalAbuse = async () => {
-  try {
-    const oneHourAgo = new Date(Date.now() - 60 * 60 * 1000);
-
-    /* const suspiciousUsers = await Transaction.aggregate([
-      {
-        $match: {
-          type: "Withdrawal",
-          status: "Rejected",
-          createdAt: {
-            $gte: oneHourAgo,
-          },
-        },
-      },
-      {
-        $group: {
-          _id: "$userId",
-          failedAttempts: {
-            $sum: 1,
-          },
-        },
-      },
-      {
-        $match: {
-          failedAttempts: {
-            $gte: 3,
-          },
-        },
-      },
-    ]);
- */
 
     const suspiciousUsers = await Transaction.aggregate([
       {
@@ -788,31 +463,14 @@ export const detectWithdrawalAbuse = async () => {
       existingAudits.map((audit) => audit.userId.toString()),
     );
 
-    for (const item of suspiciousUsers) {
-      /* const user = await User.findById(item._id);
+    const userBulkUpdates = new Map();
 
-      if (!user) continue;
- */
+    for (const item of suspiciousUsers) {
+      
       const user = item.user;
 
       if (!user) continue;
 
-      /* if (!user.withdrawalFrozen) {
-        user.withdrawalFrozen = true;
-
-        user.riskLevel = "HIGH";
-
-        user.lastRiskDetectedAt = new Date();
-
-        if (!user.riskFlags.includes("WITHDRAWAL_ABUSE")) {
-          user.riskFlags.push("WITHDRAWAL_ABUSE");
-          user.riskScore += 50;
-        }
-
-        if (user.isModified()) {
-          await user.save();
-        }
-      } */
 
       const updateData = {
         withdrawalFrozen: true,
@@ -826,12 +484,16 @@ export const detectWithdrawalAbuse = async () => {
         updateData.riskScore = (user.riskScore || 0) + 50;
       }
 
-      await User.updateOne(
-        { _id: user._id },
-        {
-          $set: updateData,
+      userBulkUpdates.set(user._id.toString(), {
+        updateOne: {
+          filter: {
+            _id: user._id,
+          },
+          update: {
+            $set: updateData,
+          },
         },
-      );
+      });
 
       const riskAlert = await createRiskAlert({
         userId: user._id,
@@ -872,34 +534,6 @@ export const detectWithdrawalAbuse = async () => {
         }
       }
 
-      /* const existingAudit = await AuditLog.findOne({
-        userId: user._id,
-        action: "WITHDRAWAL_FROZEN",
-        createdAt: {
-          $gte: oneHourAgo,
-        },
-      });
-
-      if (!existingAudit) {
-        await AuditLog.create({
-          userId: user._id,
-
-          action: "WITHDRAWAL_FROZEN",
-
-          module: "RISK_ENGINE",
-
-          severity: "CRITICAL",
-
-          targetType: "User",
-
-          targetId: user._id,
-
-          details: {
-            failedAttempts: item.failedAttempts,
-          },
-        });
-      } */
-
       if (!auditUserSet.has(user._id.toString())) {
         await AuditLog.create({
           userId: user._id,
@@ -921,6 +555,14 @@ export const detectWithdrawalAbuse = async () => {
 
         auditUserSet.add(user._id.toString());
       }
+    }
+
+    if (userBulkUpdates.size > 0) {
+      await User.bulkWrite([...userBulkUpdates.values()]);
+
+      console.log(
+        `✅ Withdrawal Abuse bulk updated ${userBulkUpdates.size} users`,
+      );
     }
   } catch (error) {
     console.log("detectWithdrawalAbuse Error:", error.message);
