@@ -18,7 +18,7 @@ export const detectRoiSpike = async () => {
     const oneHourAgo = new Date(Date.now() - 60 * 60 * 1000);
 
     console.log("One Hour Ago:", oneHourAgo);
-    
+
     const trades = await Trade.aggregate([
       {
         $match: {
@@ -31,7 +31,7 @@ export const detectRoiSpike = async () => {
           },
         },
       },
-      
+
       {
         $lookup: {
           from: "users",
@@ -86,7 +86,6 @@ export const detectRoiSpike = async () => {
     const userBulkUpdates = new Map();
 
     for (const trade of trades) {
-      
       const user = trade.user;
 
       if (!user) continue;
@@ -102,7 +101,6 @@ export const detectRoiSpike = async () => {
       console.log("ROI > 500 ?", roi > 500);
 
       if (roi > 500) {
-       
         const updateData = {
           riskLevel: "CRITICAL",
           lastRiskDetectedAt: new Date(),
@@ -279,7 +277,6 @@ export const detectMultiIpAbuse = async () => {
     const userBulkUpdates = new Map();
 
     for (const item of suspiciousUsers) {
-
       const user = item.user;
 
       if (!user) continue;
@@ -349,7 +346,6 @@ export const detectMultiIpAbuse = async () => {
           console.log("Risk Alert Email Error:", error.message);
         }
       }
-      
 
       if (!auditUserSet.has(user._id.toString())) {
         await AuditLog.create({
@@ -466,11 +462,9 @@ export const detectWithdrawalAbuse = async () => {
     const userBulkUpdates = new Map();
 
     for (const item of suspiciousUsers) {
-      
       const user = item.user;
 
       if (!user) continue;
-
 
       const updateData = {
         withdrawalFrozen: true,
@@ -576,14 +570,6 @@ export const detectWithdrawalAbuse = async () => {
 export const detectArbitragePattern = async () => {
   try {
     const oneHourAgo = new Date(Date.now() - 60 * 60 * 1000);
-    /* 
-    const trades = await Trade.find({
-      status: "CLOSED",
-      closedAt: {
-        $gte: oneHourAgo,
-      },
-    });
- */
 
     const trades = await Trade.aggregate([
       {
@@ -594,14 +580,7 @@ export const detectArbitragePattern = async () => {
           },
         },
       },
-      /* {
-        $lookup: {
-          from: "users",
-          localField: "userId",
-          foreignField: "_id",
-          as: "user",
-        },
-      }, */
+
       {
         $lookup: {
           from: "users",
@@ -649,6 +628,8 @@ export const detectArbitragePattern = async () => {
       existingAudits.map((audit) => audit.userId.toString()),
     );
 
+    const userBulkUpdates = new Map();
+
     for (const trade of trades) {
       if (!trade.closedAt || !trade.openedAt) continue;
 
@@ -656,44 +637,9 @@ export const detectArbitragePattern = async () => {
 
       // Less than 1 second
       if (duration < 1000) {
-        /*  const user = await User.findById(trade.userId);
-
-        if (!user) continue;
- */
         const user = trade.user;
 
         if (!user) continue;
-        /*         
-        user.riskLevel = "HIGH";
-
-        user.lastRiskDetectedAt = new Date();
-
-        if (!user.riskFlags.includes("ARBITRAGE_PATTERN")) {
-          user.riskFlags.push("ARBITRAGE_PATTERN");
-
-          user.riskScore += 40;
-        }
-        if (user.isModified()) {
-          await user.save();
-        }
- */
-        /* const currentUser = await User.findById(user._id).select(
-          "riskFlags riskScore",
-        );
-
-        const updateData = {
-          riskLevel: "HIGH",
-          lastRiskDetectedAt: new Date(),
-        };
-
-        if (!currentUser.riskFlags.includes("ARBITRAGE_PATTERN")) {
-          updateData.riskFlags = [
-            ...currentUser.riskFlags,
-            "ARBITRAGE_PATTERN",
-          ];
-
-          updateData.riskScore = currentUser.riskScore + 40;
-        } */
 
         const updateData = {
           riskLevel: "HIGH",
@@ -709,12 +655,16 @@ export const detectArbitragePattern = async () => {
           updateData.riskScore = (user.riskScore || 0) + 40;
         }
 
-        await User.updateOne(
-          { _id: user._id },
-          {
-            $set: updateData,
+        userBulkUpdates.set(user._id.toString(), {
+          updateOne: {
+            filter: {
+              _id: user._id,
+            },
+            update: {
+              $set: updateData,
+            },
           },
-        );
+        });
 
         const riskAlert = await createRiskAlert({
           userId: user._id,
@@ -743,7 +693,7 @@ export const detectArbitragePattern = async () => {
                 ["Trade Symbol", trade.symbol],
                 ["Duration", `${duration} ms`],
                 ["Trade ID", trade._id],
-                ["Risk Level", "HIGH" /* user.riskLevel */],
+                ["Risk Level", "HIGH" ],
               ],
 
               metadata: {
@@ -756,35 +706,6 @@ export const detectArbitragePattern = async () => {
             console.log("Risk Alert Email Error:", error.message);
           }
         }
-
-        /* const existingAudit = await AuditLog.findOne({
-          userId: user._id,
-          action: "ARBITRAGE_PATTERN_DETECTED",
-          createdAt: {
-            $gte: oneHourAgo,
-          },
-        });
-
-        if (!existingAudit) {
-          await AuditLog.create({
-            userId: user._id,
-
-            action: "ARBITRAGE_PATTERN_DETECTED",
-
-            module: "RISK_ENGINE",
-
-            severity: "WARNING",
-
-            targetType: "Trade",
-
-            targetId: trade._id,
-
-            details: {
-              duration,
-              symbol: trade.symbol,
-            },
-          });
-        } */
 
         if (!auditUserSet.has(user._id.toString())) {
           await AuditLog.create({
@@ -809,6 +730,12 @@ export const detectArbitragePattern = async () => {
           auditUserSet.add(user._id.toString());
         }
       }
+    }
+
+    if (userBulkUpdates.size > 0) {
+      await User.bulkWrite([...userBulkUpdates.values()]);
+
+      console.log(`✅ Arbitrage bulk updated ${userBulkUpdates.size} users`);
     }
   } catch (error) {
     console.log("detectArbitragePattern Error:", error.message);
